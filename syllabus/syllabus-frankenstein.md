@@ -1,15 +1,11 @@
-# Science, Frankenstein, and Causal Inference:
-## Analyzing Neighborhood Crime with Synthetic Control Methods
+# Seminar Syllabus & Session Plan
+# Science, Frankenstein, and Causal Inference: Analyzing Neighborhood Crime with Synthetic Control Methods
 
 **ICQCM Summit 2026**
 **Instructor:** Yung Chun, PhD | Research Assistant Professor, Brown School, Washington University in St. Louis
-
 **Date:** February 27, 2026 | 10:15 am – 12:30 pm
-
 **Location:** Sheraton New Orleans Hotel
-
 **Materials:** https://github.com/YungChun0303/ICQCM
-
 
 ---
 
@@ -53,10 +49,10 @@ No prior knowledge of the Synthetic Control Method is expected. Basic familiarit
 | File | Description |
 |---|---|
 | `icqcm_scm_chun_v1.pdf` | Lecture slides |
-| `data_clean/denver_crime_qtr.csv` | Quarterly crime panel, Denver census tracts, 2011–2021 |
-| `data_clean/denver_stop_qtr.csv` | Quarterly police stop panel, Denver census tracts, 2011–2021 |
-| `code/1000_synth.Rmd` | Main analysis script — worked through live during the seminar |
-| `code/0100_dataprep.Rmd` | Data preparation script — for reference only |
+| `denver_crime_qtr.csv` | Quarterly crime panel, Denver census tracts, 2011–2021 |
+| `denver_stop_qtr.csv` | Quarterly police stop panel, Denver census tracts, 2011–2021 |
+| `1000_synth.Rmd` | Main analysis script — worked through live during the seminar |
+| `0100_dataprep.Rmd` | Data preparation script — for reference only |
 
 ---
 
@@ -66,7 +62,7 @@ No prior knowledge of the Synthetic Control Method is expected. Basic familiarit
 
 ---
 
-### Block 1 — Why Causality? Why SCM? *(35 minutes)*
+### Block 1 — Why Causality? Why SCM? *(~35 minutes)*
 
 | Topic | Slides |
 |---|---|
@@ -80,10 +76,10 @@ No prior knowledge of the Synthetic Control Method is expected. Basic familiarit
 
 ---
 
-### Block 2 — SCM Theory & Identification *(25 minutes)*
+### Block 2 — SCM Theory & Identification *(~25 minutes)*
 
 | Topic | Slides |
-|---|---|---|
+|---|---|
 | The identification strategy — V weights (covariates), W weights (donor units), constructing the counterfactual | 10–13 |
 | Statistical inference — in-time placebo, in-space placebo, RMSPE ratio, Fisher p-value | 14 |
 | The Denver CNI case — program overview, research questions, raw trend preview | 15–19 |
@@ -93,16 +89,16 @@ The synthetic control is not found — it is *optimized*. The algorithm simultan
 
 ---
 
-### ☕ Break *(10 minutes)*
+### ☕ Break *(~10 minutes)*
 
 *Confirm everyone has RStudio open and `1000_synth.Rmd` loaded. Help troubleshoot setup issues.*
 
 ---
 
-### Block 3 — Live Coding: Data Walk in R *(55 minutes)*
+### Block 3 — Live Coding: Data Walk in R *(~55 minutes)*
 
 | Activity | Rmd Section | Key Concept |
-|---|---|---|---|
+|---|---|---|
 | Setup & data overview — load packages, inspect the balanced panel structure, understand the group variable | §1–2 | Balanced panel requirement; adjacent tract exclusion for spillover control |
 | Descriptive trends — plot CNI vs. donor average for crime and stops; assess parallel trends visually | §3 | Visual pre-treatment parallel trends check; divergence after 2016 as preliminary evidence |
 | Build the SCM step by step — walk through all four `tidysynth` functions; check balance table and donor weights | §4 (Steps 1–5) | The four-function pipeline; predictor balance as pre-flight check; sparse donor weights as expected outcome |
@@ -129,10 +125,10 @@ data %>%
 
 ---
 
-### Block 4 — Wrap-Up & Discussion *(10 minutes)*
+### Block 4 — Wrap-Up & Discussion *(~10 minutes)*
 
 | Topic |
-|---|---|
+|---|
 | Limitations and critical reflection — data demands, donor pool sensitivity, no mechanism identification, risk of overfitting |
 | Open discussion — where does this fit in your research? What does the causal framework assume? What does it render invisible? |
 
@@ -217,6 +213,51 @@ The set of untreated units available as building blocks for the synthetic contro
 4. Currie, J., & MacLeod, W. B. (2020). Understanding doctor decision making: The case of depression treatment. *Econometrica* — (for illustration of causal reasoning in social contexts)
 
 5. Xu, Y. (2017). Generalized synthetic control method: Causal inference with interactive fixed effects models. *Political Analysis*, 25(1), 57–76. *(For extensions to multiple treated units)*
+
+---
+
+## `tidysynth` Package Resources
+
+**Primary documentation**
+
+| Resource | Description | URL |
+|---|---|---|
+| CRAN page | Official package page with PDF reference manual | https://cran.r-project.org/package=tidysynth |
+| GitHub repository | Source code and README with full worked example | https://github.com/edunford/tidysynth |
+| PDF reference manual | Complete documentation for all 21 functions | https://cran.r-project.org/web/packages/tidysynth/tidysynth.pdf |
+
+**Package author:** Eric Dunford (Georgetown University). The package is available through both CRAN and GitHub.
+
+---
+
+**The built-in example dataset — `smoking`**
+
+The package ships with a classic dataset from Abadie et al. (2010) examining the effect of California's Proposition 99 (1988 tobacco control law) on cigarette consumption. This is the standard teaching example for SCM and is immediately runnable after installing the package:
+
+```r
+library(tidysynth)
+data("smoking")   # 1,209 rows: 39 US states × 31 years (1970–2000)
+```
+
+This dataset is ideal for self-study after the seminar because the expected results are well-documented in the original Abadie et al. (2010) paper, making it easy to verify your output against a published benchmark.
+
+---
+
+**Key functions quick reference**
+
+| Function | Purpose |
+|---|---|
+| `synthetic_control()` | Declare panel structure, treated unit, and treatment time |
+| `generate_predictor()` | Specify variables to match on (callable multiple times for different time windows) |
+| `generate_weights()` | Solve constrained optimization for donor weights |
+| `generate_control()` | Build the counterfactual using estimated weights |
+| `grab_balance_table()` | Check predictor fit between treated and synthetic |
+| `grab_unit_weights()` | See which donors contribute and how much |
+| `grab_synthetic_control()` | Extract full time series of observed vs. synthetic |
+| `grab_significance()` | MSPE ratios and Fisher p-values (requires `generate_placebos = TRUE`) |
+| `plot_trends()` | Line plot of observed vs. synthetic trajectory |
+| `plot_placebos()` | Overlay of placebo runs for visual inference |
+| `plot_mspe_ratio()` | Bar chart of MSPE ratios across all units |
 
 ---
 
