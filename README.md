@@ -19,7 +19,7 @@ This repository contains materials for the **ICQCM 2026** session on Synthetic C
 
 ## 1. Repository Structure
 
-* `/syllabus: Lecture syllabus
+* `/syllabus: Lecture syllabus.
 * `/slides`: PDF and PPTX versions of the ICQCM presentation.
 * `/data`: Sample neighborhood-level crime and stop data.
 * `/scripts`: R scripts for implementing `tidysynth`.
