@@ -2,9 +2,13 @@
 # Science, Frankenstein, and Causal Inference: Analyzing Neighborhood Crime with Synthetic Control Methods
 
 **ICQCM Summit 2026**
+
 **Instructor:** Yung Chun, PhD | Research Assistant Professor, Brown School, Washington University in St. Louis
+
 **Date:** February 27, 2026 | 10:15 am – 12:30 pm
+
 **Location:** Sheraton New Orleans Hotel
+
 **Materials:** https://github.com/YungChun0303/ICQCM
 
 ---
