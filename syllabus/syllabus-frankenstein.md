@@ -1,4 +1,4 @@
-# Seminar Syllabus & Session Plan
+## Seminar Syllabus & Session Plan
 # Science, Frankenstein, and Causal Inference: Analyzing Neighborhood Crime with Synthetic Control Methods
 
 **ICQCM Summit 2026**
