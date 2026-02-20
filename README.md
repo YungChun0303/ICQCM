@@ -1,7 +1,9 @@
 # ICQCM 2026 — Synthetic Control Methods Seminar
 
 **Seminar:** Science, Frankenstein, and Causal Inference: Analyzing Neighborhood Crime with Synthetic Control Methods
+
 **Instructor:** Yung Chun, PhD — Washington University in St. Louis
+
 **Date:** February 27, 2026 | 10:15 am – 12:30 pm | Sheraton New Orleans
 
 ---
@@ -16,7 +18,7 @@
 
 | Folder | Contents |
 |--------|----------|
-| `slides/` | Lecture slides (PPTX) |
+| `slides/` | Lecture slides (PDF) |
 | `data_clean/` | Pre-built datasets ready for analysis |
 | `code/` | R Markdown scripts for the seminar |
 
