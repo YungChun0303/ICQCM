@@ -69,12 +69,12 @@ No prior knowledge of the Synthetic Control Method is expected. Basic familiarit
 
 ### Block 1 — Why Causality? Why SCM? *(35 minutes)*
 
-| Time | Topic | Slides |
-|---|---|---|
-| 0:00–0:08 | Welcome, housekeeping, confirm materials downloaded | 1 |
-| 0:08–0:18 | Science and causal inference — Pearl's ladder of causation; association vs. intervention vs. counterfactual | 2–4 |
-| 0:18–0:28 | Causal identification strategies — RCT, natural experiment, quasi-experiment | 5 |
-| 0:28–0:35 | Why SCM? — The Doppelgänger vs. Frankenstein intuition; when DiD fails; the unique unit problem | 6–9 |
+| Topic | Slides |
+|---|---|
+| Welcome, housekeeping, confirm materials downloaded | 1 |
+| Science and causal inference — Pearl's ladder of causation; association vs. intervention vs. counterfactual | 2–4 |
+| Causal identification strategies — RCT, natural experiment, quasi-experiment | 5 |
+| Why SCM? — The Doppelgänger vs. Frankenstein intuition; when DiD fails; the unique unit problem | 6–9 |
 
 **Key question to pose to participants:**
 *"How many of you would call what you do 'science'? What would it take to actually claim causality in your research?"*
@@ -83,11 +83,11 @@ No prior knowledge of the Synthetic Control Method is expected. Basic familiarit
 
 ### Block 2 — SCM Theory & Identification *(25 minutes)*
 
-| Time | Topic | Slides |
+| Topic | Slides |
 |---|---|---|
-| 0:35–0:45 | The identification strategy — V weights (covariates), W weights (donor units), constructing the counterfactual | 10–13 |
-| 0:45–0:55 | Statistical inference — in-time placebo, in-space placebo, RMSPE ratio, Fisher p-value | 14 |
-| 0:55–1:00 | The Denver CNI case — program overview, research questions, raw trend preview | 15–19 |
+| The identification strategy — V weights (covariates), W weights (donor units), constructing the counterfactual | 10–13 |
+| Statistical inference — in-time placebo, in-space placebo, RMSPE ratio, Fisher p-value | 14 |
+| The Denver CNI case — program overview, research questions, raw trend preview | 15–19 |
 
 **Key concept to land:**
 The synthetic control is not found — it is *optimized*. The algorithm simultaneously solves for which variables to match on (V) and which donor units to weight (W), producing a weighted composite that mirrors the treated unit's pre-treatment trajectory as closely as possible.
@@ -102,13 +102,13 @@ The synthetic control is not found — it is *optimized*. The algorithm simultan
 
 ### Block 3 — Live Coding: Data Walk in R *(55 minutes)*
 
-| Time | Activity | Rmd Section | Key Concept |
+| Activity | Rmd Section | Key Concept |
 |---|---|---|---|
-| 1:10–1:20 | Setup & data overview — load packages, inspect the balanced panel structure, understand the group variable | §1–2 | Balanced panel requirement; adjacent tract exclusion for spillover control |
-| 1:20–1:30 | Descriptive trends — plot CNI vs. donor average for crime and stops; assess parallel trends visually | §3 | Visual pre-treatment parallel trends check; divergence after 2016 as preliminary evidence |
-| 1:30–1:45 | Build the SCM step by step — walk through all four `tidysynth` functions; check balance table and donor weights | §4 (Steps 1–5) | The four-function pipeline; predictor balance as pre-flight check; sparse donor weights as expected outcome |
-| 1:45–1:55 | Results — run all 8 outcomes; compare observed vs. synthetic; interpret treatment effect table | §5–8 | Reading the gap (negative = reduction); percent change for practical magnitude; researcher judgment on credibility |
-| 1:55–2:05 | Placebo tests — in-space placebos; MSPE ratio table; Fisher p-values | §9 | Uniqueness-based inference; interpreting placebo plots visually; what a significant result looks like |
+| Setup & data overview — load packages, inspect the balanced panel structure, understand the group variable | §1–2 | Balanced panel requirement; adjacent tract exclusion for spillover control |
+| Descriptive trends — plot CNI vs. donor average for crime and stops; assess parallel trends visually | §3 | Visual pre-treatment parallel trends check; divergence after 2016 as preliminary evidence |
+| Build the SCM step by step — walk through all four `tidysynth` functions; check balance table and donor weights | §4 (Steps 1–5) | The four-function pipeline; predictor balance as pre-flight check; sparse donor weights as expected outcome |
+| Results — run all 8 outcomes; compare observed vs. synthetic; interpret treatment effect table | §5–8 | Reading the gap (negative = reduction); percent change for practical magnitude; researcher judgment on credibility |
+| Placebo tests — in-space placebos; MSPE ratio table; Fisher p-values | §9 | Uniqueness-based inference; interpreting placebo plots visually; what a significant result looks like |
 
 **The four `tidysynth` functions:**
 
@@ -132,10 +132,10 @@ data %>%
 
 ### Block 4 — Wrap-Up & Discussion *(10 minutes)*
 
-| Time | Topic |
+| Topic |
 |---|---|
-| 2:05–2:10 | Limitations and critical reflection — data demands, donor pool sensitivity, no mechanism identification, risk of overfitting |
-| 2:10–2:15 | Open discussion — where does this fit in your research? What does the causal framework assume? What does it render invisible? |
+| Limitations and critical reflection — data demands, donor pool sensitivity, no mechanism identification, risk of overfitting |
+| Open discussion — where does this fit in your research? What does the causal framework assume? What does it render invisible? |
 
 **Discussion prompt:**
 *"SCM is powerful, but it operates within a positivist causal framework. What does that framework assume? What kinds of questions can't it answer? How does this sit alongside the critical quantitative orientation ICQCM emphasizes?"*
