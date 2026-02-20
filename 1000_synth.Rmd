@@ -1,0 +1,573 @@
+---
+title: "Synthetic Control Model: Denver CNI Case Study"
+subtitle: "Effects on Crime and Police Stops"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: flatly
+    code_folding: show
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+---
+
+## 1. Setup
+
+```{r libraries}
+library(tidyverse)   # data wrangling and ggplot
+library(tidysynth)   # synthetic control model
+library(knitr)       # tables
+library(kableExtra)  # table formatting
+```
+
+```{r constants}
+# Treated unit
+FIPS_CNI <- 8031000800          # CNI census tract (leading zero dropped when numeric)
+
+# Treatment timing: de facto CNI launch = 2016 Q3 (yearqtr numeric encoding = 2016.5)
+I_TIME <- 2016.5
+
+# Key dates to mark on every trend plot
+KEY_DATES <- c(
+  "De jure start\n(2014 Q1)"  = 2014.0,
+  "De facto start\n(2016 Q3)" = 2016.5,
+  "Project end\n(2018 Q3)"    = 2018.5
+)
+
+# Output folder
+dir_out <- here::here("outputs")
+dir.create(dir_out, showWarnings = FALSE)
+```
+
+---
+
+## 2. Load and Prepare Data
+
+The clean quarterly panel datasets were produced by `0100_dataprep.Rmd`.
+Each file is a **balanced panel**: every census tract has exactly **44 quarters**
+(2011 Q1 – 2021 Q4). `CNI == 1` identifies the treated tract; `CNI == 3` all
+potential donor tracts.
+
+```{r load_data}
+crime_panel_raw <- read_csv(here::here("data_clean", "denver_crime_qtr.csv"),
+                        show_col_types = FALSE) 
+stop_panel_raw  <- read_csv(here::here("data_clean", "denver_stop_qtr.csv"),
+                        show_col_types = FALSE) 
+
+# Remove adjacent tracks
+crime_panel <- crime_panel_raw %>%
+  filter(group!=2) 
+
+stop_panel <- stop_panel_raw %>%
+  filter(group!=2) 
+
+# Rename 'citation' to avoid conflict with the base R citation() function.
+stop_panel <- stop_panel %>% 
+  rename(n_citation = citation,
+         n_citation_sub = citation_sub,
+         n_citation_veh = citation_veh)
+
+cat("Crime panel:", n_distinct(crime_panel$FIPS), "tracts ×",
+    n_distinct(crime_panel$qtr), "quarters\n")
+cat("Stop panel: ", n_distinct(stop_panel$FIPS),  "tracts ×",
+    n_distinct(stop_panel$qtr),  "quarters\n")
+```
+
+---
+
+## 3. Descriptive Analysis
+
+Before running any model, we examine the raw trends.
+**What to look for:** the CNI tract (coloured line) and the donor pool average
+should move together **before** the treatment date — this is the pre-treatment
+parallel trends assumption that gives the SCM its credibility.
+
+### 3.1 Crime trends
+```{r desc_crime, fig.width = 11, fig.height = 4}
+p_crime_desc <- crime_panel %>%
+  mutate(group = ifelse(FIPS == FIPS_CNI, "CNI Tract", "Donor Tracts (avg)")) %>%
+  group_by(group, qtr) %>%
+  summarise(Allcrime = mean(Allcrime, na.rm = TRUE), .groups = "drop") %>%
+  ggplot(aes(x = qtr, y = Allcrime, color = group)) +
+  geom_line(linewidth = 0.9) +
+  geom_vline(xintercept = KEY_DATES, linetype = "dashed",
+             color = "black", linewidth = 0.4) +
+  annotate("text", x = KEY_DATES + 0.1, y = Inf,
+           label = names(KEY_DATES), hjust = 0, vjust = 1.4, size = 2.6) +
+  scale_color_manual(values = c("CNI Tract" = "firebrick",
+                                "Donor Tracts (avg)" = "grey50")) +
+  scale_x_continuous(breaks = 2011:2021) +
+  labs(title = "Quarterly crime counts: CNI tract vs. donor tract average",
+       x = NULL, y = "Mean crime count", color = NULL) +
+  theme_minimal(base_size = 11) +
+  theme(legend.position = "top")
+
+p_crime_desc
+ggsave(file.path(dir_out, "desc_crime_trends.png"),
+       p_crime_desc, width = 11, height = 4, dpi = 300)
+```
+
+### 3.2 Police stop trends
+```{r desc_stop, fig.width = 11, fig.height = 4}
+p_stop_desc <- stop_panel %>%
+  mutate(group = ifelse(FIPS == FIPS_CNI, "CNI Tract", "Donor Tracts (avg)")) %>%
+  group_by(group, qtr) %>%
+  summarise(allstop = mean(allstop, na.rm = TRUE), .groups = "drop") %>%
+  ggplot(aes(x = qtr, y = allstop, color = group)) +
+  geom_line(linewidth = 0.9) +
+  geom_vline(xintercept = KEY_DATES, linetype = "dashed",
+             color = "black", linewidth = 0.4) +
+  annotate("text", x = KEY_DATES + 0.1, y = Inf,
+           label = names(KEY_DATES), hjust = 0, vjust = 1.4, size = 2.6) +
+  scale_color_manual(values = c("CNI Tract" = "steelblue",
+                                "Donor Tracts (avg)" = "grey50")) +
+  scale_x_continuous(breaks = 2011:2021) +
+  labs(title = "Quarterly police stops: CNI tract vs. donor tract average",
+       x = NULL, y = "Mean stop count", color = NULL) +
+  theme_minimal(base_size = 11) +
+  theme(legend.position = "top")
+
+p_stop_desc
+ggsave(file.path(dir_out, "desc_stop_trends.png"),
+       p_stop_desc, width = 11, height = 4, dpi = 300)
+```
+
+---
+
+## 4. The Synthetic Control Method — Step-by-Step
+
+The **Synthetic Control Method (SCM)** builds a weighted average of untreated
+("donor") units whose pre-treatment trajectory best matches the treated unit.
+After treatment, the weighted average serves as a counterfactual: what would
+have happened without the intervention? The gap between observed and synthetic
+is the estimated treatment effect.
+
+We walk through each step using **all police stops** as the running example.
+
+---
+
+### Step 1 — Declare the panel structure
+
+`synthetic_control()` registers the panel dimensions: which column is the unit
+ID, which is time, which unit is treated, and when treatment starts.
+
+```{r synth_step1}
+synth_step1 <- stop_panel %>%
+  synthetic_control(
+    outcome           = allstop,  # outcome variable
+    unit              = FIPS,     # unit identifier (census tract)
+    time              = qtr,      # time identifier (numeric yearqtr)
+    i_unit            = FIPS_CNI, # treated unit
+    i_time            = I_TIME,   # treatment start: 2016 Q3 = 2016.5
+    generate_placebos = FALSE     # set TRUE later for inference
+  )
+```
+
+---
+
+### Step 2 — Specify pre-treatment predictors
+
+Predictors tell the algorithm which characteristics to match between the treated
+unit and the synthetic control. We use:
+
+1. **Demographic characteristics** at 2015 (the last full pre-treatment year):
+   median household income (nominal, in $1,000s), share of non-white residents, and population density.
+   Income is expressed in thousands so its scale is comparable to the other predictors;
+   the underlying data remain in nominal dollars.
+2. **Pre-treatment outcome mean** over 2011–2015: the most important predictor —
+   matching the level of the outcome before treatment.
+
+```{r synth_step2}
+synth_step2 <- synth_step1 %>%
+
+  # Predictor 1: tract demographics at 2015
+  generate_predictor(
+    time_window = 2015,
+    med_inc_k   = med_inc / 1000,  # median income in $1,000s (nominal)
+    pct_color   = pct_color,       # share non-white
+    pop         = pop,             # population population density
+    pop_density = pop_density      # population population density
+  ) %>%
+
+  # Predictor 2: average outcome over the full pre-treatment period
+  generate_predictor(
+    time_window = seq(2011, 2015.75, 0.25),
+    outcome_pre = mean(allstop, na.rm = TRUE)
+  )
+```
+
+---
+
+### Step 3 — Estimate donor weights
+
+`generate_weights()` solves a constrained optimisation problem: find non-negative
+weights $w_j \geq 0$ that sum to 1 and minimise the weighted distance between the
+treated unit's predictors and the weighted average of donor predictors.
+
+```{r synth_step3}
+synth_step3 <- synth_step2 %>%
+  generate_weights(
+    optimization_window = seq(2011, 2015.75, 0.25)  # pre-treatment window
+  )
+```
+
+---
+
+### Step 4 — Construct the synthetic control
+
+`generate_control()` applies the estimated weights to the **full** time series
+(pre and post) to produce the counterfactual trajectory.
+
+```{r synth_step4}
+synth_allstop <- synth_step3 %>%
+  generate_control()
+```
+
+---
+
+### Step 5 — Inspect the fit
+
+A valid synthetic control must track the treated unit closely **before** treatment.
+We check this in three ways.
+
+**A. Predictor balance** — do the predictors match?
+
+```{r balance_table}
+synth_allstop %>%
+  grab_balance_table() %>%
+  kable(digits = 2,
+        caption = "Predictor balance: CNI tract vs. synthetic control (all stops)") %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"), full_width = FALSE)
+```
+
+**B. Donor weights** — which tracts contribute to the synthetic control?
+
+```{r unit_weights}
+synth_allstop %>%
+  grab_unit_weights() %>%
+  filter(weight > 0.01) %>%
+  arrange(desc(weight)) %>%
+  kable(digits = 4, caption = "Donor weights > 1% (all stops)") %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"), full_width = FALSE)
+```
+
+**C. Trend plot** — does the synthetic control track the pre-treatment path?
+
+```{r walkthrough_plot, fig.width = 11, fig.height = 5}
+synth_allstop %>%
+  plot_trends(time_window = seq(2011, 2021.75, 0.25)) +
+  geom_vline(xintercept = KEY_DATES, linetype = "dashed",
+             color = "black", linewidth = 0.4) +
+  scale_x_continuous(breaks = 2011:2021) +
+  labs(
+    title   = "All police stops: CNI tract (observed) vs. synthetic control",
+    caption = "Dashed lines: de jure start (2014 Q1) | de facto start (2016 Q3) | project end (2018 Q3)",
+    x = "Quarter", y = "Quarterly stops"
+  ) +
+  theme_minimal(base_size = 11)
+```
+
+---
+
+## 5. Helper Functions
+
+Now that we understand the steps, we encapsulate them into two reusable
+functions — one for fitting, one for plotting. The same four steps from
+Section 4 run inside `run_synth()` every time we call it.
+
+```{r helpers}
+# Fit the full SCM pipeline for one outcome variable.
+# Returns a fitted tidysynth object ready for plotting and inference.
+run_synth <- function(data, outcome_var) {
+  data %>%
+    synthetic_control(
+      outcome           = {{ outcome_var }},
+      unit              = FIPS,
+      time              = qtr,
+      i_unit            = FIPS_CNI,
+      i_time            = I_TIME,
+      generate_placebos = FALSE
+    ) %>%
+    generate_predictor(
+      time_window = 2015,
+      med_inc_k = med_inc / 1000,
+      pct_color = pct_color,
+      pop         = pop,             
+      pop_density = pop_density
+    ) %>%
+    generate_predictor(
+      time_window = seq(2011, 2015.75, 0.25),
+      outcome_pre = mean({{ outcome_var }}, na.rm = TRUE)
+    ) %>%
+    generate_weights(optimization_window = seq(2011, 2015.75, 0.25)) %>%
+    generate_control()
+}
+
+# Plot observed vs. synthetic trend and save to outputs/.
+plot_synth_trends <- function(synth_obj, y_label, title, filename) {
+  p <- synth_obj %>%
+    plot_trends(time_window = seq(2011, 2021.75, 0.25)) +
+    geom_vline(xintercept = KEY_DATES, linetype = "dashed",
+               color = "black", linewidth = 0.4) +
+    scale_x_continuous(breaks = 2011:2021) +
+    labs(
+      title   = title,
+      caption = "Dashed lines: de jure start (2014 Q1) | de facto start (2016 Q3) | project end (2018 Q3)",
+      x = "Quarter", y = y_label
+    ) +
+    theme_minimal(base_size = 11)
+  print(p)
+  ggsave(file.path(dir_out, filename), p, width = 11, height = 5, dpi = 300)
+  invisible(p)
+}
+```
+
+---
+
+## 6. SCM Results — Police Stops
+
+```{r stop_allstop, fig.width=11, fig.height=5}
+synth_allstop <- run_synth(stop_panel, allstop)
+
+plot_synth_trends(synth_allstop,
+  y_label  = "Quarterly stops",
+  title    = "SCM: All police stops — CNI tract vs. synthetic control",
+  filename = "synth_stop_allstop.png")
+```
+
+```{r stop_noaction, fig.width=11, fig.height=5}
+synth_no_action <- run_synth(stop_panel, no_action)
+
+plot_synth_trends(synth_no_action,
+  y_label  = "Stops (no enforcement action)",
+  title    = "SCM: Stops with no enforcement action",
+  filename = "synth_stop_no_action.png")
+```
+
+```{r stop_citation, fig.width=11, fig.height=5}
+synth_citation <- run_synth(stop_panel, n_citation)
+
+plot_synth_trends(synth_citation,
+  y_label  = "Stops (citation issued)",
+  title    = "SCM: Stops resulting in a citation",
+  filename = "synth_stop_citation.png")
+```
+
+```{r stop_arrest, fig.width=11, fig.height=5}
+synth_arrest <- run_synth(stop_panel, arrest)
+
+plot_synth_trends(synth_arrest,
+  y_label  = "Stops (arrest made)",
+  title    = "SCM: Stops resulting in an arrest",
+  filename = "synth_stop_arrest.png")
+```
+
+---
+
+## 7. SCM Results — Crime
+
+```{r crime_allcrime, fig.width=11, fig.height=5}
+synth_allcrime <- run_synth(crime_panel, Allcrime)
+
+plot_synth_trends(synth_allcrime,
+  y_label  = "Quarterly crime incidents",
+  title    = "SCM: All crimes — CNI tract vs. synthetic control",
+  filename = "synth_crime_allcrime.png")
+```
+
+```{r crime_property, fig.width=11, fig.height=5}
+synth_property <- run_synth(crime_panel, Property)
+
+plot_synth_trends(synth_property,
+  y_label  = "Property crimes",
+  title    = "SCM: Property crimes",
+  filename = "synth_crime_property.png")
+```
+
+```{r crime_violence, fig.width=11, fig.height=5}
+synth_violence <- run_synth(crime_panel, Violence)
+
+plot_synth_trends(synth_violence,
+  y_label  = "Violent crimes",
+  title    = "SCM: Violent crimes",
+  filename = "synth_crime_violence.png")
+```
+
+```{r crime_drug, fig.width=11, fig.height=5}
+synth_drug <- run_synth(crime_panel, Drug)
+
+plot_synth_trends(synth_drug,
+  y_label  = "Drug crimes",
+  title    = "SCM: Drug crimes",
+  filename = "synth_crime_drug.png")
+```
+
+---
+
+## 8. Treatment Effect Summary
+
+For each outcome we report the **average post-treatment gap**:
+$$\text{Gap} = \bar{Y}^{\text{observed}} - \bar{Y}^{\text{synthetic}}$$
+A negative gap means the CNI tract fell *below* its counterfactual — a reduction
+attributable to the intervention.
+
+```{r compute_gap}
+# Extract the mean observed, mean synthetic, and gap for the post-treatment period.
+compute_gap <- function(synth_obj, label) {
+  synth_obj %>%
+    grab_synthetic_control() %>%        # columns: time_unit, real_y, synth_y
+    filter(time_unit >= I_TIME) %>%
+    summarise(
+      Outcome         = label,
+      `Avg Observed`  = round(mean(real_y,           na.rm = TRUE), 1),
+      `Avg Synthetic` = round(mean(synth_y,          na.rm = TRUE), 1),
+      `Avg Gap`       = round(mean(real_y - synth_y, na.rm = TRUE), 1),
+      `% Change`      = round(mean(real_y - synth_y, na.rm = TRUE) /
+                              mean(synth_y,          na.rm = TRUE) * 100, 1)
+    )
+}
+```
+
+### 8.1 Crime
+
+```{r effect_table_crime}
+bind_rows(
+  compute_gap(synth_allcrime, "All crimes"),
+  compute_gap(synth_property, "Property crimes"),
+  compute_gap(synth_violence, "Violent crimes"),
+  compute_gap(synth_drug,     "Drug crimes")
+) %>%
+  kable(caption = "Treatment effects on crime (post-2016 Q3 quarterly average)") %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"), full_width = FALSE) %>%
+  footnote(general = "Gap = Observed − Synthetic. Negative = reduction in CNI tract.")
+```
+
+### 8.2 Police Stops
+
+```{r effect_table_stop}
+bind_rows(
+  compute_gap(synth_allstop,   "All stops"),
+  compute_gap(synth_no_action, "No-action stops"),
+  compute_gap(synth_citation,  "Citation stops"),
+  compute_gap(synth_arrest,    "Arrest stops")
+) %>%
+  kable(caption = "Treatment effects on police stops (post-2016 Q3 quarterly average)") %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"), full_width = FALSE) %>%
+  footnote(general = "Gap = Observed − Synthetic. Negative = reduction in CNI tract.")
+```
+
+---
+
+## 9. Placebo (In-Space) Tests
+
+### What is a placebo test?
+
+We ask: *"What if we ran the same SCM for every donor tract, pretending each
+was the treated unit?"*
+
+Because donor tracts were **not** treated, we would expect small post-treatment
+gaps for them. If the CNI tract's gap stands out as unusually large, it provides
+evidence that the gap is real — not just noise.
+
+**Inference:** the Fisher's exact p-value is the share of units (including
+the treated unit) whose post/pre MSPE ratio is at least as large as the
+treated unit's.
+
+```{r placebo_helpers}
+# Same as run_synth() but enables the placebo runs.
+run_synth_placebo <- function(data, outcome_var) {
+  data %>%
+    synthetic_control(
+      outcome           = {{ outcome_var }},
+      unit              = FIPS,
+      time              = qtr,
+      i_unit            = FIPS_CNI,
+      i_time            = I_TIME,
+      generate_placebos = TRUE
+    ) %>%
+    generate_predictor(
+      time_window = 2015,
+      med_inc_k = med_inc / 1000,
+      pct_color = pct_color,
+      pop       = pop,
+      pop_density = pop_density
+    ) %>%
+    generate_predictor(
+      time_window = seq(2011, 2015.75, 0.25),
+      outcome_pre = mean({{ outcome_var }}, na.rm = TRUE)
+    ) %>%
+    generate_weights(optimization_window = seq(2011, 2015.75, 0.25)) %>%
+    generate_control()
+}
+
+
+# Plot placebo paths and save.
+plot_placebo <- function(synth_obj, title, filename) {
+  p <- synth_obj %>%
+    plot_placebos(time_window = seq(2011, 2021.75, 0.25)) +
+    geom_vline(xintercept = KEY_DATES, linetype = "dashed",
+               color = "black", linewidth = 0.4) +
+    scale_x_continuous(breaks = 2011:2021) +
+    labs(
+      title   = title,
+      caption = "Grey lines = donor placebos. Coloured line = CNI tract.",
+      x = "Quarter"
+    ) +
+    theme_minimal(base_size = 11)
+  print(p)
+  ggsave(file.path(dir_out, filename), p, width = 11, height = 5, dpi = 300)
+  invisible(p)
+}
+```
+
+### 9.1 Placebo: No-action
+
+```{r placebo_allstop, fig.width=11, fig.height=5}
+synth_no_action_placebo <- run_synth_placebo(stop_panel, no_action)
+
+plot_placebo(synth_allstop_placebo,
+  title    = "Placebo test: All police stops",
+  filename = "placebo_stop_noaction.png")
+```
+
+```{r placebo_allstop_sig}
+synth_no_action_placebo %>%
+  grab_significance() %>%
+  arrange(desc(mspe_ratio)) %>%
+  kable(digits = 3,
+        caption = "MSPE ratio ranking — No action (CNI tract vs. donor placebos)") %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"), full_width = FALSE)
+```
+
+### 9.2 Placebo: Drug crime
+
+```{r placebo_allcrime, fig.width=11, fig.height=5}
+synth_drug_placebo <- run_synth_placebo(crime_panel, Drug)
+
+plot_placebo(synth_drug_placebo,
+  title    = "Placebo test: Drug crimes",
+  filename = "placebo_crime_drug.png")
+```
+
+```{r placebo_allcrime_sig}
+synth_drug_placebo %>%
+  grab_significance() %>%
+  arrange(desc(mspe_ratio)) %>%
+  kable(digits = 3,
+        caption = "MSPE ratio ranking — Drug crimes (CNI tract vs. donor placebos)") %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"), full_width = FALSE)
+```
+
+---
+
+## 10. Outputs
+
+```{r summary, echo=FALSE}
+cat("Files saved to:", dir_out, "\n\n")
+cat(paste(" -", list.files(dir_out)), sep = "\n")
+```

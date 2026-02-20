@@ -1,0 +1,432 @@
+---
+title: "Data Preparation: Denver Community Navigation Initiative (CNI)"
+subtitle: "Synthetic Control Model — Lecture Dataset"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: flatly
+    code_folding: show
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+## 1. Background
+
+The **Denver Community Navigation Initiative (CNI)** was a place-based policing reform
+implemented in census tract **08031000800** (Five Points / Cole neighborhood). The policy
+replaced traditional police responses with community health navigators for certain call types.
+
+**Research question:** Did the CNI reduce crime and police stops in the treated neighborhood,
+relative to a synthetic counterfactual?
+
+This script produces two clean, quarterly panel datasets (2011 Q1 – 2021 Q4) for use in the
+SCM lecture:
+
+| Output file | Unit | Time | Key variables |
+|---|---|---|---|
+| `denver_crime_qtr.csv` | Census tract × quarter | 44 periods | `Property`, `Violence`, `Drug`, `Prostitution` (counts and per-1k) |
+| `denver_stop_qtr.csv` | Census tract × quarter | 44 periods | `allstop`, `no_action`, `citation`, `arrest` (by subject/vehicle) |
+
+**Key identifiers**
+
+- Treatment unit: `FIPS = 8031000800`
+- Treatment start: 2016 Q3 (`qtr = 2016.5` in `yearqtr` numeric encoding)
+- Adjacent tracts (excluded from donor pool): identified programmatically via spatial
+  adjacency (`st_touches`) — see Section 3
+
+---
+
+## 2. Setup
+
+```{r libraries}
+library(tidyverse)   # data wrangling
+library(zoo)         # yearqtr / yearmon classes
+library(sf)          # spatial operations
+library(tigris)      # census tract shapefiles
+library(tidycensus)  # ACS demographic data
+```
+
+```{r paths}
+dir_raw   <- here::here("data_raw")
+dir_clean <- here::here("data_clean")
+dir.create(dir_clean, showWarnings = FALSE)
+
+# ACS variables:  total pop, median HH income, race/ethnicity breakdown
+acs_vars <- c("B19013_001", "B03002_001", "B03002_003",
+              "B03002_004", "B03002_006", "B03002_012")
+
+# CNI treated tract
+FIPS_CNI <- 8031000800
+# Adjacent tracts are computed spatially in Section 3 (FIPS_ADJACENT)
+
+YEARS_CRIME <- 2011:2021   # crime data years to use
+YEARS_STOP  <- 2011:2021   # stop data years to use
+```
+
+```{r census_key, eval=FALSE}
+# Run once to install your Census API key permanently.
+# Replace the string with your own key (https://api.census.gov/data/key_signup.html)
+census_api_key("5c619b6f1f7097a9b1453b8cfe2e96d46dd7d577", install = TRUE)
+```
+
+---
+
+## 3. Geocoding: Assigning Census Tract FIPS Codes
+
+The raw data contains latitude/longitude coordinates but no census tract identifier.
+We assign tracts using a **spatial join**:
+
+1. Download 2019 Denver census tract boundaries via `tigris`
+2. Convert each incident's coordinates to an `sf` point geometry
+3. Join points to tract polygons — each point inherits the FIPS code of the polygon it
+   falls within
+
+> **Why 2019 tracts?** Census 2010 tract definitions apply through 2019; 2020 definitions
+> take effect from 2020 onward. Using 2019 boundaries provides the best coverage for our
+> 2011–2021 study window with minimal boundary change.
+
+```{r load_tracts, results='hide'}
+options(tigris_use_cache = TRUE)
+
+tracts_sf <- tracts(state = "CO", county = "Denver", year = 2019, progress_bar = FALSE) %>%
+  select(GEOID, geometry) %>%
+  mutate(FIPS = as.numeric(GEOID)) %>%
+  st_transform(crs = 4326)
+```
+
+```{r adjacent_tracts}
+# Identify all census tracts that share a boundary with the CNI tract.
+# st_touches() returns TRUE for polygons that share an edge or vertex but do not overlap.
+# These tracts are excluded from the donor pool to avoid spillover contamination.
+
+cni_geom      <- tracts_sf %>% filter(FIPS == FIPS_CNI)
+touch_idx     <- st_touches(tracts_sf, cni_geom, sparse = FALSE)[, 1]
+FIPS_ADJACENT <- tracts_sf$FIPS[touch_idx]
+
+cat("Tracts spatially adjacent to CNI tract", FIPS_CNI,
+    "(excluded from donor pool):\n")
+print(FIPS_ADJACENT)
+```
+
+```{r geocode_fn}
+# Geocode a data frame that has geo_lat / geo_lon columns.
+# Returns the data frame with an added FIPS column.
+geocode_to_tract <- function(df) {
+  pts <- df %>%
+    filter(!is.na(geo_lat), !is.na(geo_lon)) %>%
+    st_as_sf(coords = c("geo_lon", "geo_lat"), crs = 4326, remove = FALSE)
+
+  st_join(pts, tracts_sf["FIPS"], join = st_within) %>%
+    st_drop_geometry() %>%
+    filter(!is.na(FIPS))
+}
+
+# Add any missing columns (filled with 0L) so downstream selects never fail.
+ensure_cols <- function(df, cols, fill = 0L) {
+  missing <- setdiff(cols, names(df))
+  if (length(missing) > 0) df[missing] <- fill
+  df
+}
+
+# Linear interpolation of NAs within the pre-treatment period only.
+# Applied per tract (inside group_by(FIPS)); post-period values are left as-is.
+#   x:   numeric vector (one outcome column for one tract)
+#   qtr: yearqtr vector of the same length
+interp_pre <- function(x, qtr) {
+  pre <- qtr < as.yearqtr("2016 Q3")
+  x[pre] <- zoo::na.approx(x[pre], na.action = na.pass, rule = 2)
+  x
+}
+```
+
+---
+
+## 4. ACS Demographic Data
+
+We merge **2016 ACS 5-year estimates** as baseline demographic predictors. Using a single
+pre-treatment year keeps the panel join straightforward and is standard practice for SCM
+covariate construction.
+
+```{r acs_pull, cache=TRUE}
+acs_tract <- get_acs(
+  geography = "tract",
+  state     = "CO",
+  county    = "Denver",
+  year      = 2016,
+  variables = acs_vars,
+  output    = "wide",
+  geometry  = TRUE
+) %>%
+  mutate(area_sq_miles = as.numeric(st_area(geometry)) * 0.00000038610) %>%
+  transmute(
+    FIPS      = as.numeric(GEOID),
+    pop       = B03002_001E,
+    med_inc   = B19013_001E,
+    pct_color = (B03002_001E - B03002_003E) / B03002_001E,
+    pop_density = pop / area_sq_miles
+  ) %>%
+  filter(pop > 0) %>%
+  st_drop_geometry()
+```
+
+---
+
+## 5. Crime Data
+
+### 5.1 Process one year
+
+```{r crime_process_fn}
+process_crime_year <- function(year) {
+  infile <- file.path(dir_raw, paste0("crime_", year, "_reduced.csv"))
+
+  raw <- read.csv(infile) %>%
+    mutate(
+      date  = as.Date(date, "%d%b%Y"),
+      qtr   = as.yearqtr(date),
+      year2 = format(date, "%Y")
+    ) %>%
+    filter(year2 == year)          # drop any mis-dated rows
+
+  geocode_to_tract(raw)
+}
+```
+
+### 5.2 Aggregate across all years
+
+Offense categories: **Property**, **Violence**, **Drug**, **Prostitution**.
+Counts are aggregated at the **FIPS × quarter** level, then normalized per 1,000 residents.
+
+```{r crime_aggregate, cache=TRUE}
+crime_raw <- map_dfr(YEARS_CRIME, process_crime_year)
+
+crime_qtr <- crime_raw %>%
+  count(FIPS, qtr, offense) %>%
+  pivot_wider(names_from = offense, values_from = n, values_fill = 0) %>%
+  # Ensure expected columns exist even if an offense type was never observed
+  ensure_cols(c("Property", "Violence", "Drug", "Prostitution")) %>%
+  # Drop any residual unclassified codes if present
+  select(FIPS, qtr, Property, Violence, Drug, Prostitution) %>%
+  arrange(FIPS, qtr) %>%
+  # Merge ACS demographics
+  inner_join(acs_tract, by = "FIPS") %>%
+  # Per-1k rates
+  mutate(
+    Property.k     = Property     * 1000 / pop,
+    Violence.k     = Violence     * 1000 / pop,
+    Drug.k         = Drug         * 1000 / pop,
+    Prostitution.k = Prostitution * 1000 / pop,
+    Allcrime       = Property + Violence + Drug + Prostitution,
+    Allcrime.k     = Allcrime * 1000 / pop
+  ) %>%
+  # CNI classification
+  mutate(
+    group = case_when(
+      FIPS == FIPS_CNI            ~ 1L,   # treated tract
+      FIPS %in% FIPS_ADJACENT     ~ 2L,   # spatially adjacent tracts (excluded)
+      TRUE                        ~ 3L    # donor tracts
+    )
+  ) %>%
+  # Exclude adjacent tracts from the donor pool to avoid spillover contamination
+  arrange(desc(group), FIPS, qtr)
+```
+
+### 5.3 Balanced panel filter
+
+SCM requires a **complete time series** for every unit. Keep only tracts observed in all
+44 quarters (2011 Q1 – 2021 Q4).
+
+```{r crime_balance}
+crime_panel <- crime_qtr %>%
+  filter(qtr < "2022 Q1") %>%
+  drop_na() %>%
+  group_by(FIPS) %>%
+    filter(n() == 44) %>%
+  ungroup() %>%
+  mutate(qtr = as.numeric(qtr))   # numeric encoding: e.g., 2011.00, 2011.25, ...
+```
+
+```{r crime_summary}
+cat("Crime panel: ", n_distinct(crime_panel$FIPS), "tracts ×",
+    n_distinct(crime_panel$qtr), "quarters\n")
+cat("  Treated unit rows:", sum(crime_panel$FIPS == FIPS_CNI), "\n")
+cat("  Adjacent tracts:", n_distinct(crime_panel$FIPS[crime_panel$group==2]), "\n")
+cat("  Donor pool tracts:", n_distinct(crime_panel$FIPS[crime_panel$group==3]), "\n")
+```
+
+---
+
+## 6. Stop Data
+
+### 6.1 Process one year
+
+Police stop outcomes are coded as:
+
+| `call_disposition2` | Meaning |
+|---|---|
+| `0` | No enforcement action |
+| `1` | Citation issued |
+| `2` | Arrest made |
+
+Stop type (`problem`): `1` = subject stop, `2` = vehicle stop.
+
+```{r stop_process_fn}
+process_stop_year <- function(year) {
+  infile <- file.path(dir_raw, paste0("stop_", year, "_all.csv"))
+
+  raw <- read.csv(infile) %>%
+    mutate(
+      date  = as.Date(date, "%d%b%Y"),
+      qtr   = as.yearqtr(date),
+      year2 = format(date, "%Y")
+    ) %>%
+    filter(year2 == year)
+
+  geocode_to_tract(raw)
+}
+```
+
+### 6.2 Aggregate across all years
+
+```{r stop_aggregate, cache=TRUE}
+stop_raw <- map_dfr(YEARS_STOP, process_stop_year)
+
+stop_qtr <- stop_raw %>%
+  count(FIPS, qtr, call_disposition2, problem) %>%
+  pivot_wider(
+    names_from  = c(call_disposition2, problem),
+    values_from = n,
+    values_fill = 0
+  ) %>%
+  # Standardise column names: <disposition>_<type>
+  rename(
+    no_action_sub = `0_1`,
+    no_action_veh = `0_2`,
+    citation_sub  = `1_1`,
+    citation_veh  = `1_2`,
+    arrest_sub    = `2_1`,
+    arrest_veh    = `2_2`
+  ) %>%
+  # Ensure all six columns exist even if a combination was never observed
+  ensure_cols(c("no_action_sub", "no_action_veh",
+                "citation_sub",  "citation_veh",
+                "arrest_sub",    "arrest_veh")) %>%
+  mutate(
+    no_action = no_action_sub + no_action_veh,
+    citation  = citation_sub  + citation_veh,
+    arrest    = arrest_sub    + arrest_veh,
+    allstop   = no_action + citation + arrest,
+    allstop_sub = no_action_sub + citation_sub + arrest_sub,
+    allstop_veh = no_action_veh + citation_veh + arrest_veh
+  ) %>%
+  arrange(FIPS, qtr) %>%
+  inner_join(acs_tract, by = "FIPS") %>%
+  mutate(
+    allstop.k   = allstop   * 1000 / pop,
+    no_action.k = no_action * 1000 / pop,
+    citation.k  = citation  * 1000 / pop,
+    arrest.k    = arrest    * 1000 / pop
+  ) %>%
+  mutate(
+    group = case_when(
+      FIPS == FIPS_CNI         ~ 1L,
+      FIPS %in% FIPS_ADJACENT  ~ 2L,
+      TRUE                     ~ 3L
+    )
+  ) %>%
+  arrange(desc(group), FIPS, qtr)
+```
+
+### 6.3 Balanced panel filter
+
+```{r stop_balance}
+stop_panel <- stop_qtr %>%
+  filter(qtr < "2022 Q1") %>%
+  drop_na() %>%
+  group_by(FIPS) %>%
+    filter(n() == 44) %>%
+  ungroup() %>%
+  mutate(qtr = as.numeric(qtr))
+```
+
+```{r stop_summary}
+cat("Stop panel: ", n_distinct(stop_panel$FIPS), "tracts ×",
+    n_distinct(stop_panel$qtr), "quarters\n")
+cat("  Treated unit rows:", sum(stop_panel$FIPS == FIPS_CNI), "\n")
+cat("  Adjacent tracts:", n_distinct(stop_panel$FIPS[stop_panel$group ==2]), "\n")
+cat("  Donor pool tracts:", n_distinct(stop_panel$FIPS[stop_panel$group ==3]), "\n")
+```
+
+
+## 7. Export Clean Datasets
+
+Both datasets are saved in two formats:
+
+- **CSV** — portable, human-readable, easy to share
+- **RData** — preserves R object classes (e.g., `yearqtr` if needed), loads instantly with `load()`
+
+```{r export}
+# --- CSV ---
+write_csv(crime_panel, file.path(dir_clean, "denver_crime_qtr.csv"))
+write_csv(stop_panel,  file.path(dir_clean, "denver_stop_qtr.csv"))
+
+# --- RData (both objects in a single file for convenience) ---
+save(crime_panel, stop_panel,
+     file = file.path(dir_clean, "denver_synth_data.RData"))
+
+cat("Saved CSV:\n",
+    " ", file.path(dir_clean, "denver_crime_qtr.csv"), "\n",
+    " ", file.path(dir_clean, "denver_stop_qtr.csv"),  "\n\n",
+    "Saved RData:\n",
+    " ", file.path(dir_clean, "denver_synth_data.RData"), "\n\n",
+    "To reload in a future session:\n",
+    '  load("data_clean/denver_synth_data.RData")  # restores crime_panel and stop_panel\n')
+```
+
+---
+
+## 9. Data Dictionary
+
+### Output files in `data_clean/`
+
+| File | Format | Contents |
+|---|---|---|
+| `denver_crime_qtr.csv` | CSV | Crime panel |
+| `denver_stop_qtr.csv` | CSV | Stop panel |
+| `denver_synth_data.RData` | RData | Both `crime_panel` and `stop_panel` objects |
+
+### `denver_crime_qtr.csv`
+
+| Column | Type | Description |
+|---|---|---|
+| `FIPS` | numeric | 10-digit census tract FIPS (leading zero dropped) |
+| `qtr` | numeric | Quarter in `yearqtr` numeric format (e.g., 2011.00 = 2011 Q1, 2011.25 = 2011 Q2) |
+| `Property` | integer | Quarterly property crime count |
+| `Violence` | integer | Quarterly violent crime count |
+| `Drug` | integer | Quarterly drug crime count |
+| `Prostitution` | integer | Quarterly prostitution crime count |
+| `Allcrime` | integer | Sum of all four crime types |
+| `*.k` | numeric | Per-1,000 residents version of count columns |
+| `pop` | numeric | Total tract population (ACS 2016) |
+| `med_inc` | numeric | Median household income (ACS 2016) |
+| `pct_color` | numeric | Share of residents who are non-white (ACS 2016) |
+| `group` | integer | 1 = treated tract, 2 = adjacent tract, 3 = donor tract |
+
+### `denver_stop_qtr.csv`
+
+| Column | Type | Description |
+|---|---|---|
+| `FIPS` | numeric | Census tract FIPS |
+| `qtr` | numeric | Quarter (same encoding as crime data) |
+| `no_action_sub / _veh` | integer | Stops with no enforcement action, by subject / vehicle |
+| `citation_sub / _veh` | integer | Stops resulting in citation, by subject / vehicle |
+| `arrest_sub / _veh` | integer | Stops resulting in arrest, by subject / vehicle |
+| `no_action / citation / arrest` | integer | Combined (subject + vehicle) totals |
+| `allstop` | integer | Total quarterly stops |
+| `allstop_sub / _veh` | integer | Total stops by type |
+| `*.k` | numeric | Per-1,000 residents version of `allstop`, `no_action`, `citation`, `arrest` |
+| `pop / med_inc / pct_color` | numeric | ACS 2016 demographics (same as crime data) |
+| `group` | integer | 1 = treated tract, 2 = adjacent tract, 3 = donor tract |
