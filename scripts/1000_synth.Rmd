@@ -530,7 +530,7 @@ plot_placebo <- function(synth_obj, title, filename) {
 ```{r placebo_allstop, fig.width=11, fig.height=5}
 synth_no_action_placebo <- run_synth_placebo(stop_panel, no_action)
 
-plot_placebo(synth_allstop_placebo,
+plot_placebo(synth_no_action_placebo,
   title    = "Placebo test: All police stops",
   filename = "placebo_stop_noaction.png")
 ```
