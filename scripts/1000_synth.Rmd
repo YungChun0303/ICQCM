@@ -40,7 +40,7 @@ KEY_DATES <- c(
 )
 
 # Output folder
-dir_out <- here::here("outputs")
+dir_out <- here::here("..", "outputs")
 dir.create(dir_out, showWarnings = FALSE)
 ```
 
@@ -54,9 +54,9 @@ Each file is a **balanced panel**: every census tract has exactly **44 quarters*
 potential donor tracts.
 
 ```{r load_data}
-crime_panel_raw <- read_csv(here::here("data_clean", "denver_crime_qtr.csv"),
+crime_panel_raw <- read_csv(here::here("../data_clean", "denver_crime_qtr.csv"),
                         show_col_types = FALSE) 
-stop_panel_raw  <- read_csv(here::here("data_clean", "denver_stop_qtr.csv"),
+stop_panel_raw  <- read_csv(here::here("../data_clean", "denver_stop_qtr.csv"),
                         show_col_types = FALSE) 
 
 # Remove adjacent tracks
